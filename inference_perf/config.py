@@ -419,7 +419,6 @@ class SessionLifecycleReportConfig(BaseModel):
 
 class GoodputConfig(BaseModel):
     constraints: Dict[str, float] = {}
-    percentile: Optional[str] = None
 
 
 class ReportConfig(BaseModel):
