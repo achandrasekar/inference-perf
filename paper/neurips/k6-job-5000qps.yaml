@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-bench-5000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: k6-bench
+        image: k6-bench:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: QPS
+          value: "5000"
+        - name: URL
+          value: "http://vllm-llama3-8b-instruct-svc:8000"
+        - name: MODEL
+          value: "meta-llama/Llama-3.1-8B-Instruct"
+      restartPolicy: Never
+  backoffLimit: 4

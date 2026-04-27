@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vllm-bench-5000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: vllm-bench
+        image:  vllm-bench:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        command: ["vllm"]
+        args:
+        - "bench"
+        - "serve"
+        - "--backend"
+        - "openai"
+        - "--base-url"
+        - "http://vllm-llama3-8b-instruct-svc:8000"
+        - "--model"
+        - "meta-llama/Llama-3.1-8B-Instruct"
+        - "--request-rate"
+        - "1000"
+        - "--num-prompts"
+        - "300000"
+        - "--dataset-name"
+        - "random"
+        - "--random-input-len"
+        - "320"
+        - "--random-output-len"
+        - "200"
+      restartPolicy: Never
+  backoffLimit: 4

@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: locust-bench-1000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: locust-bench
+        image: locust-bench:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--host"
+        - "http://vllm-llama3-8b-instruct-svc:8000"
+        - "--users"
+        - "1000"
+        - "--spawn-rate"
+        - "1000"
+        - "--run-time"
+        - "300s"
+        - "--exit-code-on-error"
+        - "1"
+        env:
+        - name: MODEL
+          value: "meta-llama/Llama-3.1-8B-Instruct"
+      restartPolicy: Never
+  backoffLimit: 4

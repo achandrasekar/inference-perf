@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-perf-config-10000qps
+data:
+  config.yml: |
+    load:
+      type: constant
+      stages:
+      - rate: 1000
+        duration: 300
+      worker_max_concurrency: 1000
+      worker_max_tcp_connections: 2500
+    api: 
+      type: completion
+      streaming: true
+    server:
+      type: vllm
+      model_name: meta-llama/Llama-3.1-8B-Instruct
+      base_url: http://vllm-llama3-8b-instruct-svc:8000
+      ignore_eos: true
+    tokenizer:
+      pretrained_model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+    data:
+      type: random
+      input_distribution:
+        min: 320
+        max: 320
+        mean: 320
+        std_dev: 0
+        total_count: 3000000
+      output_distribution:
+        min: 200
+        max: 200
+        mean: 200
+        std_dev: 0
+        total_count: 3000000
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inference-perf-bench-1000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: inference-perf-bench
+        image: inference-perf-bench:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        args:
+        - "--config_file"
+        - "/etc/inference-perf/config.yml"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/inference-perf
+      volumes:
+      - name: config-volume
+        configMap:
+          name: inference-perf-config-1000qps
+      restartPolicy: Never
+  backoffLimit: 4

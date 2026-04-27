@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: guidellm-bench-1000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: guidellm-bench
+        image: guidellm-bench:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        args:
+        - "benchmark"
+        - "--target"
+        - "http://vllm-llama3-8b-instruct-svc:8000"
+        - "--profile"
+        - "concurrent"
+        - "--rate"
+        - "1000"
+        - "--max-seconds"
+        - "300"
+        - "--data"
+        - "prompt_tokens=320,output_tokens=200"
+      restartPolicy: Never
+  backoffLimit: 4

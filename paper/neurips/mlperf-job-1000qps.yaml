@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlperf-bench-1000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: mlperf-bench
+        image: mlperf-bench:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args:
+        - "echo 'llama3_1-8b.Server.target_qps = 1000' > user.conf && echo 'llama3_1-8b.Server.min_duration = 300000' >> user.conf && python /app/mlperf_client.py --url http://vllm-llama3-8b-instruct-svc:8000 --model-name meta-llama/Llama-3.1-8B-Instruct --user-conf user.conf --scenario Server --isl 320 --osl 200"
+      restartPolicy: Never
+  backoffLimit: 4

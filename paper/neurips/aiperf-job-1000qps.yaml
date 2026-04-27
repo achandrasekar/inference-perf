@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aiperf-bench-1000qps
+spec:
+  template:
+    spec:
+      containers:
+      - name: aiperf-bench
+        image: aiperf-bench:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        args:
+        - "profile"
+        - "--model"
+        - "meta-llama/Llama-3.1-8B-Instruct"
+        - "--streaming"
+        - "--extra-inputs"
+        - "ignore_eos:true"
+        - "--endpoint-type"
+        - "completions"
+        - "--url"
+        - "http://vllm-llama3-8b-instruct-svc:8000"
+        - "--request-rate"
+        - "1000"
+        - "--benchmark-duration"
+        - "300"
+        - "--isl"
+        - "320"
+        - "--osl"
+        - "200"
+      restartPolicy: Never
+  backoffLimit: 4
