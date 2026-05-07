@@ -33,4 +33,5 @@ ENV PYTHONPATH=/workspace
 ENV PATH="/workspace/.venv/bin:$PATH"
 
 # Run inference-perf using the virtual environment's Python
-CMD ["python", "inference_perf/main.py", "--config_file", "config.yml"]
+ENTRYPOINT ["python", "inference_perf/main.py"]
+CMD ["--config_file", "config.yml"]
