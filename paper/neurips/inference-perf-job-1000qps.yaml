@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: inference-perf-config-10000qps
+  name: inference-perf-config-1000qps
 data:
   config.yml: |
     load:

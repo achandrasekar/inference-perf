@@ -16,12 +16,17 @@ This directory contains Dockerfiles and Kubernetes Job manifests for 5 different
 
 Build the Docker images for each tool:
 
+**From `paper/neurips/` directory:**
 ```bash
 docker build -t vllm-bench:latest -f vllm.Dockerfile .
 docker build -t inferencex-bench:latest -f inferencex.Dockerfile .
 docker build -t guidellm-bench:latest -f guidellm.Dockerfile .
 docker build -t aiperf-bench:latest -f aiperf.Dockerfile .
-docker build -t inference-perf-bench:latest -f inference-perf.Dockerfile .
+```
+
+**From the project root directory:**
+```bash
+docker build -t inference-perf-bench:latest -f paper/neurips/inference-perf.Dockerfile .
 ```
 
 ### 2. Run the llm-d inference simulator
