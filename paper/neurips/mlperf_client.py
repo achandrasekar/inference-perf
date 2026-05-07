@@ -80,7 +80,6 @@ class SUT:
             "model": self.model_name,
             "prompt_token_ids": self.dataset.input_ids[qitem.index].tolist(),
             "max_tokens": self.osl,
-            "temperature": 0,
             "ignore_eos": True,
         }
 

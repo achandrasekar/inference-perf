@@ -22,7 +22,6 @@ export default function () {
     model: model,
     prompt_token_ids: Array(320).fill(1), // Dummy prompt of 320 tokens
     max_tokens: 200,
-    temperature: 0,
     ignore_eos: true,
   });
 

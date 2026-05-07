@@ -12,7 +12,6 @@ class LLMUser(FastHttpUser):
             "model": model,
             "prompt_token_ids": [1] * 320, # Dummy prompt of 320 tokens
             "max_tokens": 200,
-            "temperature": 0,
             "ignore_eos": True,
         }
         headers = {"Content-Type": "application/json"}
