@@ -2,9 +2,6 @@
 
 This guide explains how to deploy `inference-perf` to a Kubernetes cluster as a job.
 
-### via Helm Chart
-Refer to the [guide](./inference-perf/README.md) in `/deploy/inference-perf`.
-
 ### via Manual Deployment
 
 #### Setup
