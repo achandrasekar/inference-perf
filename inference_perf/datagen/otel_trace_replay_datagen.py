@@ -505,7 +505,9 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         n = data.data_index
         event = self.all_events[n]
-        session_id = event.event_id.split(":")[0] if ":" in event.event_id else event.event_id
+        session_id = (
+            data.session_id if data.session_id else (event.event_id.split(":")[0] if ":" in event.event_id else event.event_id)
+        )
         raw_event_id = event.event_id.split(":", 1)[1] if ":" in event.event_id else event.event_id
         state = self.session_graph_state.get(session_id)
         gc = state.graph.events[raw_event_id].call if state and raw_event_id in state.graph.events else None

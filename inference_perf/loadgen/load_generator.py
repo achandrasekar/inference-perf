@@ -454,6 +454,8 @@ class LoadGenerator:
 
         # Track active sessions
         active_session_indices: Set[int] = set()  # Session indices currently active
+        active_session_ids: Dict[int, str] = {}  # session_idx -> active session_id
+        session_recycled_counts: Dict[int, int] = {}  # session_idx -> recycle_count
         pending_session_indices: List[int] = list(
             range(stage_start_cursor, stage_start_cursor + effective_num_sessions)
         )  # Sessions waiting to start
@@ -495,6 +497,10 @@ class LoadGenerator:
 
         def should_start_next_session() -> bool:
             """Check if we should start the next session."""
+            # Check if duration has been exceeded
+            if stage.duration is not None and time.perf_counter() - start_time >= stage.duration:
+                return False
+
             # Check concurrency limit (0 = unlimited)
             if concurrent_sessions > 0 and len(active_session_indices) >= concurrent_sessions:
                 return False
@@ -511,7 +517,7 @@ class LoadGenerator:
 
             return True
 
-        def dispatch_session(session_idx: int) -> int:
+        def dispatch_session(session_idx: int, override_session_id: Optional[str] = None) -> int:
             """Dispatch all events for a session. Returns number of events dispatched."""
             nonlocal sessions_dispatched, last_dispatch_time, next_dispatch_time
 
@@ -519,7 +525,8 @@ class LoadGenerator:
             if not isinstance(self.datagen, SessionGenerator):
                 raise TypeError("Expected SessionGenerator for session-based operations")
             session_info = self.datagen.get_session_info(session_idx)
-            session_id = session_info["session_id"]
+            session_id = override_session_id if override_session_id is not None else session_info["session_id"]
+            active_session_ids[session_idx] = session_id
 
             logger.debug(
                 f"Starting session {session_idx}: {session_id} "
@@ -576,7 +583,10 @@ class LoadGenerator:
         # Main dispatch and wait loop
         stage_task = None
         if progress_ctx:
-            stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Sessions", total=effective_num_sessions)
+            if stage.duration is not None:
+                stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Time (s)", total=stage.duration)
+            else:
+                stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Sessions", total=effective_num_sessions)
 
         while True:
             # Check for interrupts
@@ -619,8 +629,10 @@ class LoadGenerator:
             # Check for completed sessions
             newly_completed = []
             for session_idx in list(active_session_indices):
-                session_info = self.datagen.get_session_info(session_idx)
-                session_id = session_info["session_id"]
+                session_id = active_session_ids.get(session_idx)
+                if session_id is None:
+                    session_info = self.datagen.get_session_info(session_idx)
+                    session_id = session_info["session_id"]
 
                 # Check if this session completed
                 if self.datagen.check_session_completed(session_id):
@@ -639,16 +651,18 @@ class LoadGenerator:
 
                         logger.debug(
                             f"Session {session_idx} ({session_id}) completed "
-                            f"({len(completed_session_ids)}/{effective_num_sessions} total)"
+                            f"({len(completed_session_ids)} total completed instances)"
                         )
 
             # Remove completed sessions from active pool and clean up memory
             for session_idx in newly_completed:
                 active_session_indices.discard(session_idx)
+                session_id = active_session_ids.pop(session_idx, None)
+                if session_id is None:
+                    session_info = self.datagen.get_session_info(session_idx)
+                    session_id = session_info["session_id"]
 
                 # Build and record session-level metric before cleanup
-                session_info = self.datagen.get_session_info(session_idx)
-                session_id = session_info["session_id"]
                 session_metric = self.datagen.build_session_metric(
                     session_id=session_id,
                     stage_id=stage_id,
@@ -663,15 +677,35 @@ class LoadGenerator:
                 # Clean up completed session data to prevent memory leaks
                 self.datagen.cleanup_session(session_id)
 
+                # Recycle if recycling is enabled and duration is not exceeded
+                if stage.recycle_sessions and (stage.duration is None or time.perf_counter() - start_time < stage.duration):
+                    pending_session_indices.append(session_idx)
+
             # Try to start new sessions to fill the pool
             while should_start_next_session():
                 session_idx = pending_session_indices.pop(0)
-                dispatch_session(session_idx)
 
-            # Check if we're done
-            if len(completed_session_ids) >= effective_num_sessions:
-                logger.info(f"All {effective_num_sessions} sessions completed")
-                break
+                override_id = None
+                if stage.recycle_sessions:
+                    recycle_count = session_recycled_counts.get(session_idx, 0)
+                    if recycle_count > 0 or session_idx in session_recycled_counts:
+                        recycle_count += 1
+                        session_recycled_counts[session_idx] = recycle_count
+
+                        orig_session_info = self.datagen.get_session_info(session_idx)
+                        orig_session_id = orig_session_info["session_id"]
+                        override_id = f"{orig_session_id}_rec{recycle_count}"
+                        self.datagen.register_recycled_session(orig_session_id, override_id)
+                    else:
+                        session_recycled_counts[session_idx] = 0
+
+                dispatch_session(session_idx, override_session_id=override_id)
+
+            # Check if we're done (only if duration is NOT specified; if duration is specified, we stop when queues drain)
+            if stage.duration is None:
+                if len(completed_session_ids) >= effective_num_sessions:
+                    logger.info(f"All {effective_num_sessions} sessions completed")
+                    break
 
             # Check if we should stop (no more sessions to start or wait for)
             if not pending_session_indices and not active_session_indices:
@@ -683,7 +717,11 @@ class LoadGenerator:
 
             # Update progress
             if progress_ctx and stage_task:
-                progress_ctx.update(stage_task, completed=len(completed_session_ids))
+                if stage.duration is not None:
+                    elapsed = int(time.perf_counter() - start_time)
+                    progress_ctx.update(stage_task, completed=min(elapsed, stage.duration))
+                else:
+                    progress_ctx.update(stage_task, completed=len(completed_session_ids))
 
         # Clean up progress task
         if progress_ctx and stage_task:

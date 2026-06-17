@@ -269,6 +269,8 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         return payload
 
     def _extract_session_id(self) -> str:
+        if self.session_id:
+            return self.session_id
         return self.event_id.split(":")[0] if ":" in self.event_id else self.event_id
 
     def _fail_and_notify(self, session_id: str, reason: str) -> None:
@@ -1192,7 +1194,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             original_messages.append(orig_msg)
 
         max_tokens = event.expected_output_tokens
-        session_id = event.event_id.split(":")[0] if ":" in event.event_id else event.event_id
+        session_id = (
+            data.session_id if data.session_id else (event.event_id.split(":")[0] if ":" in event.event_id else event.event_id)
+        )
         raw_event_id = event.event_id.split(":", 1)[1] if ":" in event.event_id else event.event_id
         state = self.session_graph_state.get(session_id)
         total_events = len(state.graph.events) if state else 0
@@ -1241,3 +1245,32 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
 
         del self.session_graph_state[session_id]
         logger.debug("Cleaned up session %s: removed %d events from memory", session_id, event_count)
+
+    def register_recycled_session(self, original_session_id: str, new_session_id: str) -> None:
+        """Register a new recycled session state copying graph template from original session."""
+        source_session = None
+        for session in self.sessions:
+            if session.session_id == original_session_id:
+                source_session = session
+                break
+        if source_session is None:
+            raise ValueError(f"Unknown original session: {original_session_id}")
+
+        random_string = None
+        is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(new_session_id)
+        if (self.replay_config and self.replay_config.inject_random_session_id) or is_duplicate:
+            random_string = uuid.uuid4().hex[:16]
+
+        state = ReplaySessionState(
+            session_id=new_session_id,
+            graph=source_session.graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events=set(),
+            event_completion_times={},
+            is_active=False,
+            is_complete=False,
+            random_string=random_string,
+        )
+        self.session_graph_state[new_session_id] = state
+        logger.debug("Registered recycled session state for %s", new_session_id)

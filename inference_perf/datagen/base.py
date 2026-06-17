@@ -227,6 +227,11 @@ class SessionGenerator(BaseGenerator):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def register_recycled_session(self, original_session_id: str, new_session_id: str) -> None:
+        """Register a new recycled session state copy under a new unique session ID."""
+        raise NotImplementedError
+
     # notify load gen whether request has preferred worker
     def is_preferred_worker_requested(self) -> bool:
         return False

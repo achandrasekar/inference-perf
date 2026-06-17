@@ -118,6 +118,15 @@ class TraceSessionReplayLoadStage(LoadStage):
             "cancelled and stage exits as FAILED. Optional."
         ),
     )
+    duration: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Duration to run in seconds. If set, completed sessions are recycled.",
+    )
+    recycle_sessions: bool = Field(
+        False,
+        description="Whether to recycle completed sessions to keep load active. Implicitly True if duration is set.",
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +140,11 @@ class TraceSessionReplayLoadStage(LoadStage):
                     f"concurrent_sessions ({self.concurrent_sessions}). "
                     f"You can't start sessions faster than the concurrency limit allows."
                 )
+
+        if self.duration is not None:
+            self.recycle_sessions = True
+        elif self.recycle_sessions:
+            raise ValueError("recycle_sessions requires duration to be specified to define a stopping condition.")
 
         return self
 

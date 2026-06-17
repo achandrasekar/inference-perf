@@ -21,7 +21,14 @@ import numpy as np
 from typing import Any
 
 from inference_perf.loadgen.load_generator import LoadGenerator, RequestQueueData
-from inference_perf.config import LoadConfig, LoadType, TraceConfig, TraceFormat, StandardLoadStage
+from inference_perf.config import (
+    LoadConfig,
+    LoadType,
+    TraceConfig,
+    TraceFormat,
+    StandardLoadStage,
+    TraceSessionReplayLoadStage,
+)
 from inference_perf.client.modelserver import ModelServerClient
 from inference_perf.apis import InferenceAPIData
 from inference_perf.utils.request_queue import RequestQueue
@@ -45,7 +52,7 @@ if sys.version_info < (3, 11):
 if sys.version_info < (3, 10):
     typing.TypeAlias = typing.Any
 
-from inference_perf.datagen import DataGenerator
+from inference_perf.datagen import DataGenerator, SessionGenerator
 
 
 class MockWorker:
@@ -255,6 +262,83 @@ class TestLoadGenerator(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.load_generator.interrupt_sig)
         self.load_generator._sigint_handler(signal.SIGINT, None)
         self.assertTrue(self.load_generator.interrupt_sig)
+
+
+class TestLoadGeneratorSessionReplay(unittest.IsolatedAsyncioTestCase):
+    async def test_run_session_stage_with_recycling(self) -> None:
+        mock_datagen = MagicMock(spec=SessionGenerator)
+        mock_datagen.get_session_count.return_value = 2
+        mock_datagen.get_session_info.side_effect = lambda idx: {
+            "session_id": f"session_{idx}",
+            "source_id": "test_source",
+            "session_index": idx,
+        }
+
+        mock_event = MagicMock(preferred_worker_id=-1)
+        mock_datagen.get_session_events.return_value = [mock_event]
+
+        completed_sessions = set()
+        mock_datagen.check_session_completed.side_effect = lambda sid: sid in completed_sessions
+
+        mock_datagen.build_session_metric.return_value = MagicMock()
+        mock_datagen.get_session_state.return_value = None
+
+        load_config = LoadConfig(
+            type=LoadType.TRACE_SESSION_REPLAY,
+            num_workers=1,
+            worker_max_concurrency=10,
+            stages=[
+                TraceSessionReplayLoadStage(
+                    concurrent_sessions=2,
+                    duration=2,
+                    num_sessions=2,
+                )
+            ],
+            base_seed=42,
+        )
+
+        with patch("inference_perf.loadgen.load_generator.get_circuit_breaker"):
+            load_generator = LoadGenerator(mock_datagen, load_config)
+
+        request_queue: RequestQueue[RequestQueueData] = RequestQueue(1)
+        active_counter = mp.Value("i", 0)
+        finished_counter = mp.Value("i", 0)
+        request_phase = mp.Event()
+
+        async def mock_session_completion_pacer() -> None:
+            await asyncio.sleep(0.2)
+            completed_sessions.add("session_0")
+            completed_sessions.add("session_1")
+
+            await asyncio.sleep(0.5)
+            completed_sessions.add("session_0_rec1")
+            completed_sessions.add("session_1_rec1")
+
+            await asyncio.sleep(0.5)
+            completed_sessions.add("session_0_rec2")
+            completed_sessions.add("session_1_rec2")
+
+        completion_task = asyncio.create_task(mock_session_completion_pacer())
+
+        stage = load_config.stages[0]
+        assert isinstance(stage, TraceSessionReplayLoadStage)
+
+        await load_generator.run_session_stage(
+            stage_id=0,
+            stage=stage,
+            request_queue=request_queue,
+            active_requests_counter=active_counter,
+            finished_requests_counter=finished_counter,
+            request_phase=request_phase,
+        )
+
+        await completion_task
+
+        # Assertions to ensure sessions were recycled and cleaned up
+        mock_datagen.register_recycled_session.assert_any_call("session_0", "session_0_rec1")
+        mock_datagen.register_recycled_session.assert_any_call("session_1", "session_1_rec1")
+        mock_datagen.cleanup_session.assert_any_call("session_0")
+        mock_datagen.cleanup_session.assert_any_call("session_0_rec1")
 
 
 if __name__ == "__main__":
