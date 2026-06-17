@@ -305,3 +305,108 @@ def test_weka_trace_replay_generator_mock_no_warp(tmp_path: Path) -> None:
     assert events[0].t_start_ms == 100
     assert events[1].t_start_ms == 100100
     assert events[1].wait_ms == 100100 - events[0].t_end_ms
+
+
+def test_weka_trace_replay_warmup_snapshot(tmp_path: Path) -> None:
+    # Create a mock Weka Trace file with 3 parent turns and 1 subagent spawned at turn 0
+    trace_data = {
+        "id": "mock_trace_warmup",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": [
+            {
+                "t": 0.1,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.5,
+            },
+            {
+                "t": 0.2,
+                "type": "subagent",
+                "agent_id": "sa_1",
+                "subagent_type": "some_type",
+                "tool_tokens": 0,
+                "system_tokens": 0,
+                "requests": [
+                    {
+                        "t": 0.3,
+                        "type": "n",
+                        "model": "claude-opus-4-8",
+                        "in": 2,
+                        "out": 2,
+                        "hash_ids": [99],
+                        "api_time": 0.1,
+                    }
+                ],
+            },
+            {
+                "t": 1.2,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 8,
+                "out": 4,
+                "hash_ids": [10, 20, 30, 40],
+                "api_time": 0.8,
+            },
+            {
+                "t": 2.5,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 12,
+                "out": 4,
+                "hash_ids": [10, 20, 30, 40, 50, 60],
+                "api_time": 1.0,
+            },
+        ],
+    }
+
+    trace_file = tmp_path / "mock_trace_warmup.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    # Mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
+    mock_tokenizer.get_tokenizer().decode = lambda x: ",".join(str(i) for i in x)
+
+    # API config
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+
+    # Datagen Config with start_turn_index = 2
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+        start_turn_index=2,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    # Initialize generator
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen.sessions[0]
+
+    # Parent turn 0 and 1 are warm/pruned.
+    # The subagent spawned at turn 0 is also pruned.
+    # Graph should contain exactly 1 event: parent turn 2.
+    assert len(session.graph.events) == 1
+    event = list(session.graph.events.values())[0]
+    assert event.call.call_id == "parent_turn_2"
+
+    # Verify that warm context messages are pre-populated
+    assert len(event.call.messages) > 1
+    # Check roles alternate or contain system, user, assistant messages
+    roles = [m.get("role") for m in event.call.messages]
+    assert "system" in roles or "user" in roles or "assistant" in roles

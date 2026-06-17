@@ -164,6 +164,8 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--data.weka_trace_replay.use_think_time_only` | boolean | Only use think_time attribute instead of timestamps |
 | `--data.weka_trace_replay.default_block_size` | int | Default block size if not specified in trace |
 | `--data.weka_trace_replay.num_dataset_entries` | int | Max number of dataset traces to load from HuggingFace |
+| `--data.weka_trace_replay.start_turn_index` | int | Start replay at this parent turn index. Turns prior to this index are warm context. |
+| `--data.weka_trace_replay.warmup_snapshot_sampling` | boolean | Randomly sample a start parent turn for each trace to warm up the KV-cache at different depths. |
 | `--data.conversation_replay.seed` | int | Random seed for deterministic generation |
 | `--data.conversation_replay.num_conversations` | int | Number of conversation blueprints to generate |
 | `--data.conversation_replay.shared_system_prompt_len` | int | Fixed shared system prompt length in tokens |

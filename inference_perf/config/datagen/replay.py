@@ -176,6 +176,12 @@ class WekaTraceReplayConfig(SessionReplayConfig):
     use_think_time_only: bool = Field(False, description="Only use think_time attribute instead of timestamps")
     default_block_size: int = Field(64, description="Default block size if not specified in trace")
     num_dataset_entries: int = Field(100, description="Max number of dataset traces to load from HuggingFace")
+    start_turn_index: Optional[int] = Field(
+        None, description="Start replay at this parent turn index. Turns prior to this index are warm context."
+    )
+    warmup_snapshot_sampling: bool = Field(
+        False, description="Randomly sample a start parent turn for each trace to warm up the KV-cache at different depths."
+    )
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

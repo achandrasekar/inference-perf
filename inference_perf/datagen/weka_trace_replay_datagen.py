@@ -765,10 +765,28 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if hasattr(trace, "block_size") and trace.block_size:
             trace_bs = trace.block_size
 
+        # Resolve warmup start turn
+        max_start = len(normals) - 1
+        start_k = 0
+        if self.weka_config.warmup_snapshot_sampling and max_start > 0:
+            rng = random.Random(self.base_seed + abs(hash(trace.id)))
+            start_k = rng.randint(0, max_start)
+            logger.info(f"Trace {trace.id}: warmup snapshot sampling chose turn {start_k} (out of {max_start})")
+        elif self.weka_config.start_turn_index is not None:
+            start_k = min(self.weka_config.start_turn_index, max_start)
+            logger.info(f"Trace {trace.id}: start_turn_index config chose turn {start_k} (out of {max_start})")
+
+        first_parent_request_idx = normals[start_k][0] if normals else 0
+
         parent_plan = _ParentPlan(trace.id, normals, subagents, block_size=trace_bs)
 
         child_plans: List[_ChildPlan] = []
-        for sa_index, (_, entry) in enumerate(subagents):
+        for sa_index, (sa_idx, entry) in enumerate(subagents):
+            if sa_idx < first_parent_request_idx:
+                logger.debug(
+                    f"Trace {trace.id}: pruning subagent {entry.agent_id} spawned at request index {sa_idx} prior to start turn {start_k}"
+                )
+                continue
             streams = _pack_into_streams(list(entry.requests))
             if not streams:
                 streams = [[]]
@@ -830,8 +848,32 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             decode_tokens_to_text=decode_tokens_to_text,
         )
 
+        # Warm up the reconstructor state with pruned turns
+        for k in range(start_k):
+            req = parent_plan.normals[k][1]
+            seed = f"{trace.id}:turn_{k}:partial_tail"
+            if k == 0:
+                parent_recon.init_turn_0(
+                    hash_ids=req.hash_ids,
+                    in_tokens=req.input_length,
+                    tool_tokens=trace.tool_tokens,
+                    system_tokens=trace.system_tokens,
+                    seed=seed,
+                )
+            else:
+                prev_req = parent_plan.normals[k - 1][1]
+                parent_recon.advance_turn(
+                    prev_hash_ids=prev_req.hash_ids,
+                    prev_in_tokens=prev_req.input_length,
+                    prev_out_tokens=prev_req.output_length,
+                    curr_hash_ids=req.hash_ids,
+                    curr_in_tokens=req.input_length,
+                    seed=seed,
+                )
+
         parent_calls: List[RawCall] = []
-        for k, (outer_idx, req) in enumerate(parent_plan.normals):
+        for k in range(start_k, len(parent_plan.normals)):
+            outer_idx, req = parent_plan.normals[k]
             seed = f"{trace.id}:turn_{k}:partial_tail"
             if k == 0:
                 parent_recon.init_turn_0(
