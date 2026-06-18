@@ -340,6 +340,73 @@ class TestLoadGeneratorSessionReplay(unittest.IsolatedAsyncioTestCase):
         mock_datagen.cleanup_session.assert_any_call("session_0")
         mock_datagen.cleanup_session.assert_any_call("session_0_rec1")
 
+    async def test_worker_nested_credit_concurrency(self) -> None:
+        mock_client = AsyncMock(spec=ModelServerClient)
+        request_queue: RequestQueue[RequestQueueData] = RequestQueue(1)
+
+        stop_signal = mp.Event()
+        cancel_signal = mp.Event()
+        request_phase = mp.Event()
+        request_phase.set()
+
+        finished_counter = mp.Value("i", 0)
+        active_counter = mp.Value("i", 0)
+        mock_datagen = MagicMock()
+
+        from inference_perf.loadgen.load_generator import Worker
+
+        worker = Worker(
+            id=0,
+            client=mock_client,
+            request_queue=request_queue.get_channel(0),
+            datagen=mock_datagen,
+            max_concurrency=1,  # Strict concurrency limit of 1
+            stop_signal=stop_signal,
+            cancel_signal=cancel_signal,
+            request_phase=request_phase,
+            finished_requests_counter=finished_counter,
+            active_requests_counter=active_counter,
+            shared_max_concurrency=None,
+            base_seed=42,
+        )
+
+        class MockSessionRequest(InferenceAPIData):
+            session_id: str
+            event_id: str
+
+            def get_api_type(self) -> Any:
+                return None
+
+            def get_route(self) -> str:
+                return ""
+
+            async def to_request_body(self, *args: Any, **kwargs: Any) -> Any:
+                return {}
+
+            async def process_response(self, *args: Any, **kwargs: Any) -> Any:
+                return MagicMock()
+
+            async def wait_for_predecessors_and_substitute(self) -> None:
+                pass
+
+        req1 = MockSessionRequest(session_id="session_A", event_id="event_1")
+        req2 = MockSessionRequest(session_id="session_A", event_id="event_2")
+
+        with patch("inference_perf.loadgen.load_generator.LazyLoadDataMixin.get_request") as mock_get_req:
+            mock_get_req.side_effect = [req1, req2]
+
+            request_queue.put(RequestQueueData(stage_id=0, request_data=req1, request_time=0.0, lora_adapter=None), 0)
+            request_queue.put(RequestQueueData(stage_id=0, request_data=req2, request_time=0.0, lora_adapter=None), 0)
+
+            async def stop_later() -> None:
+                await asyncio.sleep(0.3)
+                stop_signal.set()
+
+            asyncio.create_task(stop_later())
+            await worker.loop()
+
+            self.assertEqual(mock_client.process_request.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

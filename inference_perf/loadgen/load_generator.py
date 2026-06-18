@@ -135,6 +135,10 @@ class Worker(mp.Process):
         item = None
         timeout = 0.5
 
+        # Active session tracker for credit-based nested concurrency
+        active_sessions: dict[str, int] = {}
+        session_semaphores: dict[str, bool] = {}
+
         while not self.stop_signal.is_set():
             # Check if max_concurrency has been updated and recreate semaphore if needed (concurrent load type)
             if self.shared_max_concurrency and not self.skip:
@@ -158,25 +162,45 @@ class Worker(mp.Process):
 
             # Process requests in loop
             while self.request_phase.is_set() and not self.cancel_signal.is_set() and not self.skip:
-                await semaphore.acquire()
                 try:
                     # Use partial to pass named arg
                     get = partial(self.request_queue.get, timeout=timeout)
                     item = await event_loop.run_in_executor(None, get)
                     if item is None:
-                        semaphore.release()
                         continue
                 except TimeoutError:
                     logger.debug(f"[Worker {self.id}] timed out getting request from queue")
-                    semaphore.release()
                     continue
                 except Empty:
-                    semaphore.release()
                     continue
                 except Exception as e:
                     logger.info(f"[Worker {self.id}] hit exception {e}")
-                    semaphore.release()
                     continue
+
+                try:
+                    stage_id, request, request_time, lora_adapter = item
+                    request_data = LazyLoadDataMixin.get_request(self.datagen, request)
+                except Exception as e:
+                    logger.error(f"[Worker {self.id}] Failed to get request: {e}", exc_info=True)
+                    with self.finished_requests_counter.get_lock():
+                        self.finished_requests_counter.value += 1
+                    self.request_queue.task_done()
+                    continue
+
+                # Session-based concurrency management
+                session_id = getattr(request_data, "session_id", None)
+                if session_id:
+                    active_sessions[session_id] = active_sessions.get(session_id, 0) + 1
+                    if session_id not in session_semaphores:
+                        logger.debug(f"[Worker {self.id}] Session {session_id} first event. Acquiring semaphore permit.")
+                        await semaphore.acquire()
+                        session_semaphores[session_id] = True
+                    else:
+                        logger.debug(
+                            f"[Worker {self.id}] Session {session_id} child event. Bypassing semaphore permit acquisition."
+                        )
+                else:
+                    await semaphore.acquire()
 
                 async def schedule_client(
                     queue: "mp.JoinableQueue[RequestQueueData]",
@@ -221,18 +245,21 @@ class Worker(mp.Process):
                         with self.finished_requests_counter.get_lock():
                             self.finished_requests_counter.value += 1
                         queue.task_done()
-                        semaphore.release()
 
-                try:
-                    stage_id, request, request_time, lora_adapter = item
-                    request_data = LazyLoadDataMixin.get_request(self.datagen, request)
-                except Exception as e:
-                    logger.error(f"[Worker {self.id}] Failed to get request: {e}", exc_info=True)
-                    with self.finished_requests_counter.get_lock():
-                        self.finished_requests_counter.value += 1
-                    self.request_queue.task_done()
-                    semaphore.release()
-                    continue
+                        # Handle credit/concurrency release
+                        session_id = getattr(request_data, "session_id", None)
+                        if session_id:
+                            active_sessions[session_id] -= 1
+                            if active_sessions[session_id] == 0:
+                                logger.debug(
+                                    f"[Worker {self.id}] Session {session_id} fully completed. Releasing semaphore permit."
+                                )
+                                active_sessions.pop(session_id)
+                                if session_id in session_semaphores:
+                                    session_semaphores.pop(session_id)
+                                    semaphore.release()
+                        else:
+                            semaphore.release()
 
                 task = create_task(
                     schedule_client(self.request_queue, request_data, request_time, stage_id, semaphore, lora_adapter)
