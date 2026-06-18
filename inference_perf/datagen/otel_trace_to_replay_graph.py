@@ -136,9 +136,11 @@ def messages_equal(a: ReplayMessage, b: ReplayMessage) -> bool:
     return a.role == b.role and message_content_text(a) == message_content_text(b)
 
 
-def output_matches_message(output_text: str, msg: ReplayMessage, allow_partial_match: bool = False) -> bool:
-    """Return True if msg is an assistant message whose content matches output_text."""
-    if msg.role != "assistant":
+def output_matches_message(
+    output_text: str, msg: ReplayMessage, allow_partial_match: bool = False, match_any_role: bool = False
+) -> bool:
+    """Return True if msg content matches output_text."""
+    if not match_any_role and msg.role != "assistant":
         return False
     msg_text = message_content_text(msg)
     if msg_text == output_text:
@@ -321,6 +323,7 @@ class RawCall:
     max_tokens_recorded: Optional[int]
     tool_definitions: Optional[List[Dict[str, Any]]] = None
     extra_attributes: Dict[str, Any] = field(default_factory=dict)
+    thread_id: str = "main"
 
 
 def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -549,10 +552,13 @@ def get_causal_dep(
     if not a.out_message or not b.messages:
         return None
     a_out = a.out_message.text or ""
+    match_any_role = getattr(a, "thread_id", "main") != "main"
     for msg_idx, msg in enumerate(b.messages):
-        if output_matches_message(a_out, msg, allow_partial_match=True):
+        if output_matches_message(a_out, msg, allow_partial_match=True, match_any_role=match_any_role):
             # Cache only exact matches (for reuse in decompose_input)
-            if output_matches_for_substitutions is not None and output_matches_message(a_out, msg, allow_partial_match=False):
+            if output_matches_for_substitutions is not None and output_matches_message(
+                a_out, msg, allow_partial_match=False, match_any_role=match_any_role
+            ):
                 cache_key = (a.call_id, b.call_id)
                 if cache_key not in output_matches_for_substitutions:
                     output_matches_for_substitutions[cache_key] = []
@@ -985,8 +991,9 @@ def build_graph(
         # Look for the closest possible predecessor. It's not necessarily the immediate predecessor, as they can be executed in parallel
         for j in range(i - 1, -1, -1):
             if is_valid_predecessor(calls[j], calls[i]):
-                predecessor_index = j
-                break
+                if getattr(calls[j], "thread_id", None) == getattr(calls[i], "thread_id", None):
+                    predecessor_index = j
+                    break
         # Only add temporal predecessor if one was found and it's not already a predecessor
         if predecessor_index is not None and predecessor_index not in predecessor_indices[i]:
             predecessor_indices[i][predecessor_index] = DEPENDENCY_TYPE.TEMPORAL

@@ -192,8 +192,8 @@ def test_weka_trace_replay_generator_mock(tmp_path: Path) -> None:
 
     # Mock tokenizer
     mock_tokenizer = MagicMock()
-    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
-    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
 
     # API config
     api_cfg = APIConfig(type=APIType.Chat, streaming=False)
@@ -270,8 +270,8 @@ def test_weka_trace_replay_generator_mock_no_warp(tmp_path: Path) -> None:
 
     # Mock tokenizer
     mock_tokenizer = MagicMock()
-    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
-    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
 
     # API config
     api_cfg = APIConfig(type=APIType.Chat, streaming=False)
@@ -370,8 +370,8 @@ def test_weka_trace_replay_warmup_snapshot(tmp_path: Path) -> None:
 
     # Mock tokenizer
     mock_tokenizer = MagicMock()
-    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
-    mock_tokenizer.get_tokenizer().decode = lambda x: ",".join(str(i) for i in x)
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
 
     # API config
     api_cfg = APIConfig(type=APIType.Chat, streaming=False)
@@ -410,3 +410,122 @@ def test_weka_trace_replay_warmup_snapshot(tmp_path: Path) -> None:
     # Check roles alternate or contain system, user, assistant messages
     roles = [m.get("role") for m in event.call.messages]
     assert "system" in roles or "user" in roles or "assistant" in roles
+
+
+def test_weka_trace_replay_delayed_join(tmp_path: Path) -> None:
+    # Timeline:
+    # 0.1s - 0.2s: Parent Turn 0 (ends at 200ms)
+    # 0.22s - 0.3s: Subagent Spawn (ends at 300ms)
+    # 0.32s - 0.42s: Parent Turn 1 (starts after subagent ends, but does not join subagent)
+    # 0.45s: Parent Turn 2 (joins subagent)
+    trace_data = {
+        "id": "mock_trace_delayed_join",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": [
+            {
+                "t": 0.1,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.1,
+            },
+            {
+                "t": 0.22,
+                "type": "subagent",
+                "agent_id": "sa_1",
+                "subagent_type": "some_type",
+                "tool_tokens": 0,
+                "system_tokens": 0,
+                "requests": [
+                    {
+                        "t": 0.23,
+                        "type": "n",
+                        "model": "claude-opus-4-8",
+                        "in": 2,
+                        "out": 2,
+                        "hash_ids": [99],
+                        "api_time": 0.07,
+                    }
+                ],
+            },
+            {
+                "t": 0.32,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 8,
+                "out": 2,
+                "hash_ids": [10, 20, 30, 40],
+                "api_time": 0.1,
+            },
+            {
+                "t": 0.45,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 12,
+                "out": 2,
+                "hash_ids": [10, 20, 30, 40, 99, 100],
+                "api_time": 0.1,
+            },
+        ],
+    }
+
+    trace_file = tmp_path / "mock_trace_delayed_join.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    # Mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
+
+    # API config
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+
+    # Datagen Config
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    # Initialize generator
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen.sessions[0]
+
+    # Graph should contain exactly 4 events
+    assert len(session.graph.events) == 4
+
+    events_by_id = session.graph.events
+
+    # Event IDs:
+    # event_000_parent_turn_0
+    # event_001_sa_sa_1_s0_turn_0
+    # event_002_parent_turn_1
+    # event_003_parent_turn_2
+
+    e0_id = [k for k in events_by_id.keys() if "parent_turn_0" in k][0]
+    e1_id = [k for k in events_by_id.keys() if "sa_sa_1_s0_turn_0" in k][0]
+    e2_id = [k for k in events_by_id.keys() if "parent_turn_1" in k][0]
+    e3_id = [k for k in events_by_id.keys() if "parent_turn_2" in k][0]
+
+    # e2 (parent turn 1) should NOT depend on e1 (subagent). It should depend on e0 (parent turn 0).
+    assert e1_id not in events_by_id[e2_id].predecessor_event_ids
+    assert e0_id in events_by_id[e2_id].predecessor_event_ids
+
+    # e3 (parent turn 2) should depend on both e2 (parent turn 1) and e1 (subagent turn 0)
+    assert e2_id in events_by_id[e3_id].predecessor_event_ids
+    assert e1_id in events_by_id[e3_id].predecessor_event_ids

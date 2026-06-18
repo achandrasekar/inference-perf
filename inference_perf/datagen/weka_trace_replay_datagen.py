@@ -781,7 +781,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         parent_plan = _ParentPlan(trace.id, normals, subagents, block_size=trace_bs)
 
         child_plans: List[_ChildPlan] = []
-        for sa_index, (sa_idx, entry) in enumerate(subagents):
+        for _sa_index, (sa_idx, entry) in enumerate(subagents):
             if sa_idx < first_parent_request_idx:
                 logger.debug(
                     f"Trace {trace.id}: pruning subagent {entry.agent_id} spawned at request index {sa_idx} prior to start turn {start_k}"
@@ -799,7 +799,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     _ChildPlan(
                         session_id=child_sid,
                         parent_trace_id=trace.id,
-                        subagent_index=sa_index,
+                        subagent_index=sa_idx,
                         entry=entry,
                         stream_index=stream_idx,
                         stream_requests=stream_reqs,
@@ -952,6 +952,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     completion_tokens=req.output_length,
                     temperature=0.0,
                     max_tokens_recorded=req.output_length,
+                    thread_id="main",
                 )
             )
 
@@ -1020,8 +1021,42 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                             expected_out_text = seg.content
                             break
                 else:
-                    out_tokens = sample_partial_tail_tokens(creq.output_length, f"{cp.session_id}:final_turn_completion")
-                    expected_out_text = decode_tokens_to_text(out_tokens)
+                    # Subagent final turn: lookahead to joining parent request
+                    subagent_end_t = timing.subagent_end_by_outer_idx.get(cp.subagent_index)
+                    joining_parent_req = None
+                    joining_parent_idx = None
+                    if subagent_end_t is not None:
+                        for idx, (p_idx, p_req) in enumerate(parent_plan.normals):
+                            p_timing = timing.parent_by_outer_idx.get(p_idx)
+                            if p_timing and p_timing.timestamp_seconds >= subagent_end_t:
+                                joining_parent_req = p_req
+                                joining_parent_idx = idx
+                                break
+
+                    out_hashes = None
+                    if joining_parent_req is not None and joining_parent_idx is not None:
+                        parent_prev_req = parent_plan.normals[joining_parent_idx - 1][1] if joining_parent_idx > 0 else None
+                        prev_hash_ids = parent_prev_req.hash_ids if parent_prev_req else []
+                        curr_hash_ids = joining_parent_req.hash_ids
+                        lcp = longest_common_prefix(prev_hash_ids, curr_hash_ids)
+                        new_blocks = curr_hash_ids[lcp:]
+
+                        sub_in = creq.hash_ids
+                        idx_in_new = -1
+                        for i in range(len(new_blocks) - len(sub_in) + 1):
+                            if new_blocks[i : i + len(sub_in)] == sub_in:
+                                idx_in_new = i
+                                break
+
+                        if idx_in_new >= 0:
+                            asst_blocks = math.ceil(creq.output_length / trace_bs)
+                            out_hashes = new_blocks[idx_in_new + len(sub_in) : idx_in_new + len(sub_in) + asst_blocks]
+
+                    if out_hashes:
+                        expected_out_text = decode_tokens_to_text(decode_block_tokens(out_hashes))
+                    else:
+                        out_tokens = sample_partial_tail_tokens(creq.output_length, f"{cp.session_id}:final_turn_completion")
+                        expected_out_text = decode_tokens_to_text(out_tokens)
 
                 out_msg = ReplayMessage(role="assistant", text=expected_out_text)
 
@@ -1039,6 +1074,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                         completion_tokens=creq.output_length,
                         temperature=0.0,
                         max_tokens_recorded=creq.output_length,
+                        thread_id=cp.session_id,
                     )
                 )
 
