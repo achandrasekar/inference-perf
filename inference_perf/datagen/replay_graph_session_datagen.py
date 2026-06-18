@@ -228,6 +228,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     inject_random_session_id: bool = False
     session_random_string: Optional[str] = None
     override_tool_call_max_tokens: bool = False
+    use_live_responses: bool = True
 
     async def to_request_body(
         self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
@@ -363,7 +364,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
     def _build_messages_with_substitution(self) -> List[Dict[str, Any]]:
         # NOTE: when input_segments is empty, the original_messages list is returned
         # by reference (not copied). Callers must not mutate the returned list.
-        if not self.input_segments:
+        if not self.input_segments or not self.use_live_responses:
             return self.original_messages
 
         result: List[Dict[str, Any]] = []
@@ -1226,6 +1227,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             inject_random_session_id=self.replay_config.inject_random_session_id if self.replay_config else False,
             session_random_string=state.random_string if state else None,
             override_tool_call_max_tokens=self.replay_config.override_tool_call_max_tokens if self.replay_config else False,
+            use_live_responses=self.replay_config.use_live_responses if self.replay_config else True,
         )
 
     def cleanup_session(self, session_id: str) -> None:

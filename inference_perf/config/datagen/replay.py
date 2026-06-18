@@ -76,6 +76,10 @@ class SessionReplayConfig(BaseModel):
         True,
         description="Override tool call max_tokens to 4096 instead of using trace recorded length",
     )
+    use_live_responses: bool = Field(
+        True,
+        description="Whether to propagate live assistant responses into subsequent prompts. If False, canned responses from the trace are used.",
+    )
 
     # KV-cache invalidation
     inject_random_session_id: bool = Field(

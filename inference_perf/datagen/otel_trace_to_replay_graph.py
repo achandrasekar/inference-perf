@@ -977,8 +977,6 @@ def build_graph(
                 # so we skip checking them in future iterations
                 transitive_preds.update(get_causal_ancestors(j))
 
-        # All predecessors in curr_causal_preds are direct (not transitive)
-        # because we skipped transitive ones in the loop above
         predecessor_indices[i].update(curr_causal_preds)
 
         """

@@ -15,6 +15,14 @@
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
+import pytest
+from inference_perf.datagen.replay_graph_session_datagen import (
+    EventOutputRegistry,
+    SessionChatCompletionAPIData,
+    WorkerSessionTracker,
+)
+from inference_perf.datagen.replay_graph_types import InputSegment
+from inference_perf.apis.chat import ChatMessage
 
 from inference_perf.config import APIConfig, APIType, DataConfig, DataGenType
 from inference_perf.datagen.weka_trace_replay_datagen import (
@@ -529,3 +537,60 @@ def test_weka_trace_replay_delayed_join(tmp_path: Path) -> None:
     # e3 (parent turn 2) should depend on both e2 (parent turn 1) and e1 (subagent turn 0)
     assert e2_id in events_by_id[e3_id].predecessor_event_ids
     assert e1_id in events_by_id[e3_id].predecessor_event_ids
+
+
+@pytest.mark.asyncio
+async def test_session_api_data_live_vs_canned() -> None:
+    # Set up mock registry
+    registry = EventOutputRegistry()
+    registry.record("event_0", "live output text", [])
+
+    # Set up inputs
+    original_messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "canned output text"},
+        {"role": "user", "content": "next prompt"},
+    ]
+    input_segments = [
+        InputSegment(type="shared", message_count=1, token_count=1),
+        InputSegment(type="output", message_count=1, token_count=1, source_event_id="event_0"),
+        InputSegment(type="unique", message_count=1, token_count=1),
+    ]
+
+    # Test Case 1: use_live_responses = True
+    data_live = SessionChatCompletionAPIData(
+        messages=[ChatMessage(role=m["role"], content=m.get("content")) for m in original_messages],
+        max_tokens=100,
+        event_id="event_1",
+        registry=registry,
+        worker_tracker=WorkerSessionTracker(),
+        completion_queue=None,
+        total_events_in_session=2,
+        predecessor_event_ids=["event_0"],
+        input_segments=input_segments,
+        original_messages=original_messages,
+        use_live_responses=True,
+    )
+
+    await data_live.wait_for_predecessors_and_substitute()
+    # Live output should be substituted!
+    assert data_live.messages[1].content == "live output text"
+
+    # Test Case 2: use_live_responses = False
+    data_canned = SessionChatCompletionAPIData(
+        messages=[ChatMessage(role=m["role"], content=m.get("content")) for m in original_messages],
+        max_tokens=100,
+        event_id="event_1",
+        registry=registry,
+        worker_tracker=WorkerSessionTracker(),
+        completion_queue=None,
+        total_events_in_session=2,
+        predecessor_event_ids=["event_0"],
+        input_segments=input_segments,
+        original_messages=original_messages,
+        use_live_responses=False,
+    )
+
+    await data_canned.wait_for_predecessors_and_substitute()
+    # Canned output should be kept (no substitution)!
+    assert data_canned.messages[1].content == "canned output text"

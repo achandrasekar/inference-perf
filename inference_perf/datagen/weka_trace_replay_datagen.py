@@ -1029,9 +1029,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                         for idx, (p_idx, p_req) in enumerate(parent_plan.normals):
                             p_timing = timing.parent_by_outer_idx.get(p_idx)
                             if p_timing and p_timing.timestamp_seconds >= subagent_end_t:
-                                joining_parent_req = p_req
-                                joining_parent_idx = idx
-                                break
+                                if all(h in p_req.hash_ids for h in creq.hash_ids):
+                                    joining_parent_req = p_req
+                                    joining_parent_idx = idx
+                                    break
 
                     out_hashes = None
                     if joining_parent_req is not None and joining_parent_idx is not None:
