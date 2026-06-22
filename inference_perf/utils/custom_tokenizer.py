@@ -21,6 +21,7 @@ class CustomTokenizer:
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
             config.pretrained_model_name_or_path, token=config.token, trust_remote_code=config.trust_remote_code
         )
+        self.tokenizer.model_max_length = 100000000
 
     def count_tokens(self, text: str) -> int:
         if text == "":
