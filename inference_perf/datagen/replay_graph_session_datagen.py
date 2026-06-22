@@ -849,8 +849,9 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
 
         self.output_registry = EventOutputRegistry()
         self.worker_tracker = WorkerSessionTracker()
-        if mp_manager is not None:
-            self.session_completion_queue: Any = mp_manager.Queue()
+        if self.num_workers > 0:
+            import multiprocessing as mp
+            self.session_completion_queue = mp.Queue()
         else:
             self.session_completion_queue = None
 

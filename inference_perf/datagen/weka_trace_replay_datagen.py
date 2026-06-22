@@ -81,6 +81,32 @@ from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
 
+_global_generator = None
+
+def _build_session_worker_task_global(trace_and_index: Tuple[Any, int]) -> Optional[ReplaySession]:
+    import sys
+    trace, trace_index = trace_and_index
+    global _global_generator
+    if _global_generator is None:
+        print("Worker error: _global_generator is None!", file=sys.stderr)
+        return None
+    try:
+        raw_calls = _global_generator._reconstruct_raw_calls(trace)
+        if not raw_calls:
+            return None
+        from inference_perf.datagen.otel_trace_to_replay_graph import build_graph
+        graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+        session_id = f"wekatrace{trace_index}_{trace.id}"
+        return ReplaySession(
+            session_id=session_id,
+            source_id=trace.id,
+            session_index=trace_index,
+            graph=graph,
+        )
+    except Exception as e:
+        print(f"Worker failed to process Weka trace {trace.id}: {e}", file=sys.stderr)
+        return None
+
 
 # =============================================================================
 # Weka Trace Pydantic Models
@@ -597,6 +623,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         mp_manager: Optional[SyncManager] = None,
         base_seed: Optional[int] = None,
         num_workers: int = 1,
+        worker_mode: bool = False,
     ) -> None:
         if not hasattr(config, "weka_trace_replay") or config.weka_trace_replay is None:
             raise ValueError("weka_trace_replay configuration is required for WekaTraceReplayDataGenerator")
@@ -640,10 +667,39 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self._hash_id_rng = HashIdRandomGenerator(self.base_seed)
         self._cache: Dict[int, List[int]] = {}
 
-        # Load all WekaTrace records
-        traces = self._load_weka_traces()
-        sessions = self._build_sessions_from_traces(traces)
-        self.initialize_sessions(sessions)
+        if not worker_mode:
+            import pickle
+            cache_file = Path("/workspace/weka_sessions_cache.pkl")
+            if cache_file.is_file():
+                logger.info("Loading pre-built session graphs from cache file...")
+                try:
+                    with open(cache_file, "rb") as f:
+                        sessions = pickle.load(f)
+                    logger.info(f"Successfully loaded {len(sessions)} sessions from cache")
+                except Exception as e:
+                    logger.error(f"Failed to load sessions from cache: {e}. Rebuilding...")
+                    traces = self._load_weka_traces()
+                    sessions = self._build_sessions_from_traces(traces)
+                    # Try to save to cache
+                    try:
+                        with open(cache_file, "wb") as f:
+                            pickle.dump(sessions, f)
+                    except Exception as e_save:
+                        logger.error(f"Failed to cache built sessions: {e_save}")
+            else:
+                # Load all WekaTrace records
+                traces = self._load_weka_traces()
+                sessions = self._build_sessions_from_traces(traces)
+                # Try to save to cache
+                try:
+                    logger.info("Saving built session graphs to cache file...")
+                    with open(cache_file, "wb") as f:
+                        pickle.dump(sessions, f)
+                    logger.info("Successfully cached built sessions")
+                except Exception as e:
+                    logger.error(f"Failed to cache built sessions: {e}")
+
+            self.initialize_sessions(sessions)
 
     def _load_weka_traces(self) -> List[WekaTrace]:
         """Loads traces from directories, files, or Hugging Face dataset."""
@@ -716,28 +772,45 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
     def _build_sessions_from_traces(self, traces: List[WekaTrace]) -> List[ReplaySession]:
         sessions: List[ReplaySession] = []
 
-        for trace_index, trace in enumerate(traces):
-            try:
-                raw_calls = self._reconstruct_raw_calls(trace)
-                if not raw_calls:
-                    continue
+        if self.num_workers > 1:
+            import multiprocessing as mp
+            logger.info(f"Building {len(traces)} trace sessions in parallel using {self.num_workers} processes")
+            
+            global _global_generator
+            _global_generator = self
+            
+            tasks = [(trace, idx) for idx, trace in enumerate(traces)]
+            ctx = mp.get_context("fork")
+            with ctx.Pool(processes=self.num_workers) as pool:
+                results = pool.map(_build_session_worker_task_global, tasks)
+                
+            for res in results:
+                if res is not None:
+                    sessions.append(res)
+        else:
+            logger.info(f"Building {len(traces)} trace sessions sequentially")
+            for trace_index, trace in enumerate(traces):
+                try:
+                    raw_calls = self._reconstruct_raw_calls(trace)
+                    if not raw_calls:
+                        continue
 
-                graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+                    graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
 
-                # Make session ID unique per trace run
-                session_id = f"wekatrace{trace_index}_{trace.id}"
-                sessions.append(
-                    ReplaySession(
-                        session_id=session_id,
-                        source_id=trace.id,
-                        session_index=trace_index,
-                        graph=graph,
+                    # Make session ID unique per trace run
+                    session_id = f"wekatrace{trace_index}_{trace.id}"
+                    sessions.append(
+                        ReplaySession(
+                            session_id=session_id,
+                            source_id=trace.id,
+                            session_index=trace_index,
+                            graph=graph,
+                        )
                     )
-                )
-            except Exception as e:
-                logger.error(f"Failed to process Weka trace {trace.id}: {e}")
-                if not self.weka_config.skip_invalid_files:
-                    raise
+                except Exception as e:
+                    logger.error(f"Failed to process Weka trace {trace.id}: {e}")
+                    if not self.weka_config.skip_invalid_files:
+                        raise
 
         # Shuffle sessions for stress testing
         random.seed(self.base_seed)

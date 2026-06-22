@@ -964,15 +964,29 @@ def build_graph(
         curr_causal_preds: Dict[int, DEPENDENCY_TYPE] = {}
         # Track indices that are transitively connected (ancestors of found predecessors)
         transitive_preds: Set[int] = set()
+        # Track thread IDs for which we have already found a causal predecessor
+        found_threads: Set[str] = set()
 
         for j in range(i - 1, -1, -1):
             # If j is already known to be a transitive predecessor, skip expensive check
             if j in transitive_preds:
                 continue
 
+            # Lineage check optimization: skip comparison if threads are not in the same lineage
+            thread_j = getattr(calls[j], "thread_id", "main")
+            thread_i = getattr(calls[i], "thread_id", "main")
+            if not (thread_j.startswith(thread_i) or thread_i.startswith(thread_j)):
+                continue
+
+            # Intra-thread linearity optimization: skip checking earlier calls in thread_j if we already found a predecessor in it
+            if thread_j in found_threads:
+                continue
+
             dep_type = get_causal_dep(calls[j], calls[i], output_matches_for_substitutions)
             if dep_type is not None:
                 curr_causal_preds[j] = dep_type
+                # Mark this thread as resolved for call i
+                found_threads.add(thread_j)
                 # Add all of j's causal ancestors as transitive predecessors
                 # so we skip checking them in future iterations
                 transitive_preds.update(get_causal_ancestors(j))

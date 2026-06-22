@@ -445,6 +445,7 @@ class LoadGenerator:
 
         start_time_epoch = time.time()
         start_time = time.perf_counter()
+        last_status_log_time = 0.0
 
         # Get total number of sessions
 
@@ -616,6 +617,15 @@ class LoadGenerator:
                 stage_task = progress_ctx.add_task(description=f"Stage {stage_id} Sessions", total=effective_num_sessions)
 
         while True:
+            now_time = time.perf_counter()
+            if now_time - last_status_log_time >= 10.0:
+                logger.info(
+                    f"[STATUS] Stage {stage_id}: active_sessions={len(active_session_indices)} "
+                    f"(indices: {list(active_session_indices)}), pending_sessions={len(pending_session_indices)}, "
+                    f"completed_sessions={len(completed_session_ids)}, elapsed={now_time - start_time:.1f}s"
+                )
+                last_status_log_time = now_time
+
             # Check for interrupts
             if self.interrupt_sig:
                 if progress_ctx and stage_task:
@@ -728,16 +738,18 @@ class LoadGenerator:
 
                 dispatch_session(session_idx, override_session_id=override_id)
 
-            # Check if we're done (only if duration is NOT specified; if duration is specified, we stop when queues drain)
-            if stage.duration is None:
+            # Check if we should stop
+            if stage.duration is not None:
+                if time.perf_counter() - start_time >= stage.duration:
+                    logger.info("Duration exceeded. Stopping stage.")
+                    break
+            else:
                 if len(completed_session_ids) >= effective_num_sessions:
                     logger.info(f"All {effective_num_sessions} sessions completed")
                     break
-
-            # Check if we should stop (no more sessions to start or wait for)
-            if not pending_session_indices and not active_session_indices:
-                logger.info("No more sessions to dispatch or wait for")
-                break
+                if not pending_session_indices and not active_session_indices:
+                    logger.info("No more sessions to dispatch or wait for")
+                    break
 
             # Sleep and update progress
             await sleep(0)
