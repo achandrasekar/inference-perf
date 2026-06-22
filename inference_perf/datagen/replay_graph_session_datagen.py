@@ -1055,7 +1055,10 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         session = self.sessions[session_index]
         event_indices = self.get_session_event_indices(session_index)
         session_worker_id = abs(hash(session.session_id)) % self.num_workers
-        return [LazyLoadInferenceAPIData(data_index=idx, preferred_worker_id=session_worker_id) for idx in event_indices]
+        return [
+            LazyLoadInferenceAPIData(data_index=idx, preferred_worker_id=session_worker_id, session_id=session.session_id)
+            for idx in event_indices
+        ]
 
     def build_session_metric(
         self,
@@ -1225,7 +1228,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             expected_output_is_tool_call=gc.expected_output_is_tool_call if gc else False,
             expected_output_tool_names=gc.expected_output_tool_names if gc else None,
             otel_context=data.otel_context,
-            session_id=data.session_id,
+            session_id=session_id,
             preferred_worker_id=data.preferred_worker_id,
             # Pass KV-cache invalidation configuration and session random string
             inject_random_session_id=self.replay_config.inject_random_session_id if self.replay_config else False,
