@@ -53,7 +53,7 @@ else:
     # Runtime usage will still require Python 3.11+.
     TaskGroup = object
 
-from typing import List, Tuple, Optional, NamedTuple, Union, Set, Dict, Any
+from typing import List, Tuple, Optional, NamedTuple, Union, Set, Dict
 from types import FrameType
 import time
 import multiprocessing as mp
@@ -607,58 +607,6 @@ class LoadGenerator:
 
             logger.debug(f"Dispatched {dispatched_count} events for session {session_idx}")
             return dispatched_count
-
-        # Warmup Cache-Priming Phase
-        warmup_enabled = False
-        if hasattr(self.datagen, "config") and getattr(self.datagen.config, "weka_trace_replay", None) is not None:
-            weka_cfg = self.datagen.config.weka_trace_replay
-            if weka_cfg is not None and getattr(weka_cfg, "warmup_cache_priming", False):
-                warmup_enabled = True
-
-        from inference_perf.datagen.replay_graph_session_datagen import ReplayGraphSessionGeneratorBase
-        if warmup_enabled and isinstance(self.datagen, ReplayGraphSessionGeneratorBase):
-            logger.info("Stage %d - starting warmup cache-priming phase...", stage_id)
-            warmup_events: List[Tuple[int, Any]] = []
-            for i in range(stage_start_cursor, stage_start_cursor + effective_num_sessions):
-                session = self.datagen.sessions[i]
-                if getattr(session, "warmup_event", None) is not None:
-                    warmup_events.append((i, session.warmup_event))
-
-            if warmup_events:
-                logger.info(f"Stage {stage_id} - dispatching {len(warmup_events)} warmup priming requests...")
-                # Reset finished counter to track warmup completions
-                with finished_requests_counter.get_lock():
-                    finished_requests_counter.value = 0
-
-                for session_idx, w_event in warmup_events:
-                    session = self.datagen.sessions[session_idx]
-                    session_id = session.session_id
-
-                    # Materialize the warmup event using the datagen helper method
-                    lazy_data = self.datagen.materialize_warmup_event(w_event, session_id, stage_id)
-
-                    lora_adapter = self._get_lora_adapter()
-                    worker_id = lazy_data.preferred_worker_id
-                    if worker_id >= 0:
-                        worker_id = worker_id % active_workers
-
-                    event_time = time.perf_counter()
-                    queue_data = RequestQueueData(stage_id, lazy_data, event_time, lora_adapter)
-                    request_queue.put(queue_data, worker_id)
-
-                # Wait for all warmup requests to complete
-                num_warmup_expected = len(warmup_events)
-                logger.info(f"Stage {stage_id} - waiting for {num_warmup_expected} warmup requests to complete...")
-                while True:
-                    with finished_requests_counter.get_lock():
-                        completed = finished_requests_counter.value
-                    if completed >= num_warmup_expected:
-                        break
-                    await sleep(0.1)
-                logger.info("Stage %d - warmup cache-priming phase completed successfully!", stage_id)
-                # Reset finished requests counter so it doesn't pollute the profiling stage
-                with finished_requests_counter.get_lock():
-                    finished_requests_counter.value = 0
 
         # Main dispatch and wait loop
         stage_task = None

@@ -713,18 +713,20 @@ def test_weka_trace_replay_warmup_cache_priming(tmp_path: Path) -> None:
     assert len(gen.sessions) == 1
     session = gen.sessions[0]
 
-    # Warmup event should be populated on the session!
-    assert session.warmup_event is not None
-    assert session.warmup_event.call_id == "sa_warmup_mock_trace_priming_turn_2"
-    assert session.warmup_event.event_id == "warmup:mock_trace_priming"
-    assert session.warmup_event.expected_output_tokens == 1
-    assert session.warmup_event.max_tokens_recorded == 1
-    assert len(session.warmup_event.messages) > 0
+    # Warmup event should be integrated into the graph, not populated on session
+    assert session.warmup_event is None
 
-    # Materialize the event using the generator and check properties
-    stage_id = 1
-    lazy_data = gen.materialize_warmup_event(session.warmup_event, session.session_id, stage_id)
-    assert lazy_data.session_id == session.session_id
-    assert lazy_data.stage_id == stage_id
-    assert lazy_data.max_tokens == 1
-    assert lazy_data.expected_output_content == "warmup"
+    # Graph should contain exactly the warmup event as the sole root node
+    warmup_id = "warmup:mock_trace_priming"
+    assert warmup_id in session.graph.events
+    assert session.graph.root_event_ids == [warmup_id]
+
+    warmup_event = session.graph.events[warmup_id]
+    assert warmup_event.call.expected_output_tokens == 1
+    assert warmup_event.call.max_tokens_recorded == 1
+    assert len(warmup_event.call.messages) > 0
+
+    # The original root event should now depend on the warmup event
+    # The first normal request in Weka trace starts at index 0. Turn 3 is parent_turn_3.
+    original_root_id = [eid for eid in session.graph.events.keys() if "turn_3" in eid][0]
+    assert warmup_id in session.graph.events[original_root_id].predecessor_event_ids

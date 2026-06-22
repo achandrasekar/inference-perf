@@ -1239,40 +1239,21 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         event: ReplaySessionEvent,
         session_id: str,
         stage_id: int,
-    ) -> SessionChatCompletionAPIData:
+    ) -> ChatCompletionAPIData:
         """Materialize a ReplaySessionEvent representing a warmup request."""
         chat_messages = []
-        original_messages: List[Dict[str, Any]] = []
         for msg in event.messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             chat_messages.append(ChatMessage(role=role, content=str(content)))
-            original_messages.append({"role": role, "content": str(content)})
 
-        return SessionChatCompletionAPIData(
+        return ChatCompletionAPIData(
             messages=chat_messages,
             max_tokens=1,
-            tool_definitions=None,
-            event_id=event.event_id,
-            registry=self.output_registry,
-            worker_tracker=getattr(self, "worker_tracker", WorkerSessionTracker()),
-            completion_queue=getattr(self, "session_completion_queue", None),
-            total_events_in_session=1,
-            predecessor_event_ids=[],
-            wait_ms=0,
-            input_segments=[],
-            original_messages=original_messages,
-            expected_output_content="warmup",
-            expected_output_is_tool_call=False,
-            expected_output_tool_names=None,
-            otel_context=None,
+            labels={"type": "warmup"},
             session_id=session_id,
             stage_id=stage_id,
             preferred_worker_id=abs(hash(session_id)) % self.num_workers,
-            inject_random_session_id=False,
-            session_random_string=None,
-            override_tool_call_max_tokens=False,
-            use_live_responses=False,
         )
 
     def cleanup_session(self, session_id: str) -> None:

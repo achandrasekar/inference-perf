@@ -77,7 +77,7 @@ from inference_perf.datagen.otel_trace_to_replay_graph import (
     RawCall,
     build_graph,
 )
-from inference_perf.datagen.replay_graph_types import ReplayMessage
+from inference_perf.datagen.replay_graph_types import ReplayMessage, GraphEvent, GraphCall, InputSegment, ReplayGraph
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,9 @@ def _build_session_worker_task_global(trace_and_index: Tuple[Any, int]) -> Optio
         from inference_perf.datagen.otel_trace_to_replay_graph import build_graph
 
         graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+        if _global_generator.weka_config.warmup_cache_priming and warmup_event is not None:
+            _global_generator._insert_warmup_event_into_graph(graph, warmup_event)
+            warmup_event = None
         session_id = f"wekatrace{trace_index}_{trace.id}"
         return ReplaySession(
             session_id=session_id,
@@ -805,6 +808,9 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     raw_calls, warmup_event = calls_and_warmup
 
                     graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+                    if self.weka_config.warmup_cache_priming and warmup_event is not None:
+                        self._insert_warmup_event_into_graph(graph, warmup_event)
+                        warmup_event = None
 
                     # Make session ID unique per trace run
                     session_id = f"wekatrace{trace_index}_{trace.id}"
@@ -1197,3 +1203,53 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         if self.weka_config.use_static_model:
             return {m: self.weka_config.static_model_name for m in trace.models}
         return configured
+
+    def _insert_warmup_event_into_graph(self, graph: ReplayGraph, warmup_event: ReplaySessionEvent) -> None:
+        """Insert the warmup event directly into the session graph as the sole root node."""
+        warmup_id = warmup_event.event_id
+
+        # Calculate total input tokens (estimate from messages)
+        total_input_tokens = sum(len(msg.get("content", "")) // 4 for msg in warmup_event.messages)
+        total_input_tokens = max(1, total_input_tokens)
+
+        input_segments = [
+            InputSegment(
+                type="unique",
+                message_count=len(warmup_event.messages),
+                token_count=total_input_tokens,
+            )
+        ]
+
+        graph_call = GraphCall(
+            call_id=warmup_event.call_id,
+            model=warmup_event.model if hasattr(warmup_event, "model") else "",
+            messages=warmup_event.messages,
+            input_segments=input_segments,
+            expected_output="warmup",
+            expected_output_tokens=1,
+            total_input_tokens=total_input_tokens,
+            temperature=0.0,
+            max_tokens_recorded=1,
+        )
+
+        graph_event = GraphEvent(
+            event_id=warmup_id,
+            call=graph_call,
+            predecessor_event_ids=[],
+            predecessor_dependency_types={},
+            wait_ms=0,
+            t_start_ms=0,
+            t_end_ms=0,
+        )
+
+        # Add warmup event to graph.events
+        graph.events[warmup_id] = graph_event
+
+        # Update existing root events to depend on the warmup event
+        for root_id in graph.root_event_ids:
+            if root_id in graph.events:
+                # Add warmup_id to predecessors of the root event
+                graph.events[root_id].predecessor_event_ids.append(warmup_id)
+
+        # Set graph.root_event_ids to contain ONLY the warmup event
+        graph.root_event_ids = [warmup_id]
