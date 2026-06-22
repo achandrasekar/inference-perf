@@ -825,6 +825,7 @@ class ReplaySession:
     session_index: int
     graph: ReplayGraph
     start_offset_ms: int = 0
+    warmup_event: Optional[ReplaySessionEvent] = None
 
 
 class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
@@ -849,8 +850,10 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
 
         self.output_registry = EventOutputRegistry()
         self.worker_tracker = WorkerSessionTracker()
+        self.session_completion_queue: Optional[Any] = None
         if self.num_workers > 0:
             import multiprocessing as mp
+
             self.session_completion_queue = mp.Queue()
         else:
             self.session_completion_queue = None
@@ -1229,6 +1232,47 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             session_random_string=state.random_string if state else None,
             override_tool_call_max_tokens=self.replay_config.override_tool_call_max_tokens if self.replay_config else False,
             use_live_responses=self.replay_config.use_live_responses if self.replay_config else True,
+        )
+
+    def materialize_warmup_event(
+        self,
+        event: ReplaySessionEvent,
+        session_id: str,
+        stage_id: int,
+    ) -> SessionChatCompletionAPIData:
+        """Materialize a ReplaySessionEvent representing a warmup request."""
+        chat_messages = []
+        original_messages: List[Dict[str, Any]] = []
+        for msg in event.messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            chat_messages.append(ChatMessage(role=role, content=str(content)))
+            original_messages.append({"role": role, "content": str(content)})
+
+        return SessionChatCompletionAPIData(
+            messages=chat_messages,
+            max_tokens=1,
+            tool_definitions=None,
+            event_id=event.event_id,
+            registry=self.output_registry,
+            worker_tracker=getattr(self, "worker_tracker", WorkerSessionTracker()),
+            completion_queue=getattr(self, "session_completion_queue", None),
+            total_events_in_session=1,
+            predecessor_event_ids=[],
+            wait_ms=0,
+            input_segments=[],
+            original_messages=original_messages,
+            expected_output_content="warmup",
+            expected_output_is_tool_call=False,
+            expected_output_tool_names=None,
+            otel_context=None,
+            session_id=session_id,
+            stage_id=stage_id,
+            preferred_worker_id=abs(hash(session_id)) % self.num_workers,
+            inject_random_session_id=False,
+            session_random_string=None,
+            override_tool_call_max_tokens=False,
+            use_live_responses=False,
         )
 
     def cleanup_session(self, session_id: str) -> None:

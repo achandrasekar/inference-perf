@@ -594,3 +594,137 @@ async def test_session_api_data_live_vs_canned() -> None:
     await data_canned.wait_for_predecessors_and_substitute()
     # Canned output should be kept (no substitution)!
     assert data_canned.messages[1].content == "canned output text"
+
+
+def test_weka_trace_replay_ratio_snapshot(tmp_path: Path) -> None:
+    # Create a mock Weka Trace file with 10 parent turns
+    requests = []
+    for i in range(10):
+        requests.append(
+            {
+                "t": 0.1 * (i + 1),
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.5,
+            }
+        )
+    trace_data = {
+        "id": "mock_trace_ratio",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": requests,
+    }
+
+    trace_file = tmp_path / "mock_trace_ratio.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
+
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    # Sample between 0.4 and 0.6
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+        warmup_snapshot_sampling=True,
+        warmup_snapshot_min_ratio=0.4,
+        warmup_snapshot_max_ratio=0.6,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen.sessions[0]
+
+    # 10 turns total. With ratio in [0.4, 0.6], start_k should be 4 or 5.
+    # Let's check which turn was chosen!
+    # If start_k = 4, there are 6 events left.
+    # If start_k = 5, there are 5 events left.
+    num_events = len(session.graph.events)
+    assert num_events in [5, 6]
+
+
+def test_weka_trace_replay_warmup_cache_priming(tmp_path: Path) -> None:
+    # Create a mock Weka Trace file with 5 parent turns
+    requests = []
+    for i in range(5):
+        requests.append(
+            {
+                "t": 0.1 * (i + 1),
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.5,
+            }
+        )
+    trace_data = {
+        "id": "mock_trace_priming",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": requests,
+    }
+
+    trace_file = tmp_path / "mock_trace_priming.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [ord(c) for c in x]
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(chr(i) for i in x)
+
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    # Enable cache priming and force start turn to 3
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+        start_turn_index=3,
+        warmup_cache_priming=True,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen.sessions[0]
+
+    # Warmup event should be populated on the session!
+    assert session.warmup_event is not None
+    assert session.warmup_event.call_id == "sa_warmup_mock_trace_priming_turn_2"
+    assert session.warmup_event.event_id == "warmup:mock_trace_priming"
+    assert session.warmup_event.expected_output_tokens == 1
+    assert session.warmup_event.max_tokens_recorded == 1
+    assert len(session.warmup_event.messages) > 0
+
+    # Materialize the event using the generator and check properties
+    stage_id = 1
+    lazy_data = gen.materialize_warmup_event(session.warmup_event, session.session_id, stage_id)
+    assert lazy_data.session_id == session.session_id
+    assert lazy_data.stage_id == stage_id
+    assert lazy_data.max_tokens == 1
+    assert lazy_data.expected_output_content == "warmup"

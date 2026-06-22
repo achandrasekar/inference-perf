@@ -71,6 +71,7 @@ from inference_perf.config import APIConfig, DataConfig
 from inference_perf.datagen.replay_graph_session_datagen import (
     ReplaySession,
     ReplayGraphSessionGeneratorBase,
+    ReplaySessionEvent,
 )
 from inference_perf.datagen.otel_trace_to_replay_graph import (
     RawCall,
@@ -83,18 +84,22 @@ logger = logging.getLogger(__name__)
 
 _global_generator = None
 
+
 def _build_session_worker_task_global(trace_and_index: Tuple[Any, int]) -> Optional[ReplaySession]:
     import sys
+
     trace, trace_index = trace_and_index
     global _global_generator
     if _global_generator is None:
         print("Worker error: _global_generator is None!", file=sys.stderr)
         return None
     try:
-        raw_calls = _global_generator._reconstruct_raw_calls(trace)
-        if not raw_calls:
+        res = _global_generator._reconstruct_raw_calls(trace)
+        if not res:
             return None
+        raw_calls, warmup_event = res
         from inference_perf.datagen.otel_trace_to_replay_graph import build_graph
+
         graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
         session_id = f"wekatrace{trace_index}_{trace.id}"
         return ReplaySession(
@@ -102,6 +107,7 @@ def _build_session_worker_task_global(trace_and_index: Tuple[Any, int]) -> Optio
             source_id=trace.id,
             session_index=trace_index,
             graph=graph,
+            warmup_event=warmup_event,
         )
     except Exception as e:
         print(f"Worker failed to process Weka trace {trace.id}: {e}", file=sys.stderr)
@@ -669,6 +675,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         if not worker_mode:
             import pickle
+
             cache_file = Path("/workspace/weka_sessions_cache.pkl")
             if cache_file.is_file():
                 logger.info("Loading pre-built session graphs from cache file...")
@@ -774,16 +781,17 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
         if self.num_workers > 1:
             import multiprocessing as mp
+
             logger.info(f"Building {len(traces)} trace sessions in parallel using {self.num_workers} processes")
-            
+
             global _global_generator
             _global_generator = self
-            
+
             tasks = [(trace, idx) for idx, trace in enumerate(traces)]
             ctx = mp.get_context("fork")
             with ctx.Pool(processes=self.num_workers) as pool:
                 results = pool.map(_build_session_worker_task_global, tasks)
-                
+
             for res in results:
                 if res is not None:
                     sessions.append(res)
@@ -791,9 +799,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             logger.info(f"Building {len(traces)} trace sessions sequentially")
             for trace_index, trace in enumerate(traces):
                 try:
-                    raw_calls = self._reconstruct_raw_calls(trace)
-                    if not raw_calls:
+                    calls_and_warmup = self._reconstruct_raw_calls(trace)
+                    if not calls_and_warmup:
                         continue
+                    raw_calls, warmup_event = calls_and_warmup
 
                     graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
 
@@ -805,6 +814,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                             source_id=trace.id,
                             session_index=trace_index,
                             graph=graph,
+                            warmup_event=warmup_event,
                         )
                     )
                 except Exception as e:
@@ -817,7 +827,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         random.shuffle(sessions)
         return sessions
 
-    def _reconstruct_raw_calls(self, trace: WekaTrace) -> List[RawCall]:
+    def _reconstruct_raw_calls(self, trace: WekaTrace) -> Tuple[List[RawCall], Optional[ReplaySessionEvent]]:
         # Reset local cache for deterministic scope
         self._cache.clear()
         self._hash_id_rng.set_trace_id(trace.id)
@@ -843,8 +853,14 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         start_k = 0
         if self.weka_config.warmup_snapshot_sampling and max_start > 0:
             rng = random.Random(self.base_seed + abs(hash(trace.id)))
-            start_k = rng.randint(0, max_start)
-            logger.info(f"Trace {trace.id}: warmup snapshot sampling chose turn {start_k} (out of {max_start})")
+            min_ratio = getattr(self.weka_config, "warmup_snapshot_min_ratio", 0.25)
+            max_ratio = getattr(self.weka_config, "warmup_snapshot_max_ratio", 0.75)
+            ratio = rng.uniform(min_ratio, max_ratio)
+            start_k = int(ratio * len(normals))
+            start_k = max(0, min(start_k, max_start))
+            logger.info(
+                f"Trace {trace.id}: warmup snapshot sampling chose turn {start_k} (ratio {ratio:.3f}, out of {max_start})"
+            )
         elif self.weka_config.start_turn_index is not None:
             start_k = min(self.weka_config.start_turn_index, max_start)
             logger.info(f"Trace {trace.id}: start_turn_index config chose turn {start_k} (out of {max_start})")
@@ -944,6 +960,24 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     seed=seed,
                 )
 
+        warmup_event = None
+        if self.weka_config.warmup_cache_priming and start_k > 0:
+            messages_dicts = parent_recon.snapshot_messages()
+            warmup_event = ReplaySessionEvent(
+                call_id=f"sa_warmup_{trace.id}_turn_{start_k - 1}",
+                event_id=f"warmup:{trace.id}",
+                session_index=-1,
+                t_start_ms=0,
+                t_end_ms=1000,
+                model=model_map.get(parent_plan.normals[start_k - 1][1].model, parent_plan.normals[start_k - 1][1].model),
+                messages=messages_dicts,
+                expected_output="warmup",
+                input_segments=[],
+                expected_output_tokens=1,
+                temperature=0.0,
+                max_tokens_recorded=1,
+            )
+
         parent_calls: List[RawCall] = []
         for k in range(start_k, len(parent_plan.normals)):
             outer_idx, req = parent_plan.normals[k]
@@ -1025,7 +1059,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     completion_tokens=req.output_length,
                     temperature=0.0,
                     max_tokens_recorded=req.output_length,
-                    thread_id="main",
+                    thread_id=trace.id,
                 )
             )
 
@@ -1155,7 +1189,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         # Combine all parent and child calls, then sort chronologically
         all_calls = parent_calls + child_calls
         all_calls.sort(key=lambda c: (c.t_start_ms, c.call_id))
-        return all_calls
+        return all_calls, warmup_event
 
     def _build_model_map(self, trace: WekaTrace) -> Dict[str, str]:
         """Maps trace-side models to configured api_config or target models."""

@@ -186,6 +186,9 @@ class WekaTraceReplayConfig(SessionReplayConfig):
     warmup_snapshot_sampling: bool = Field(
         False, description="Randomly sample a start parent turn for each trace to warm up the KV-cache at different depths."
     )
+    warmup_snapshot_min_ratio: float = Field(0.25, description="Min ratio of conversation progress for snapshot sampling")
+    warmup_snapshot_max_ratio: float = Field(0.75, description="Max ratio of conversation progress for snapshot sampling")
+    warmup_cache_priming: bool = Field(False, description="Enable 1-token KV-cache priming for start turns")
 
     @model_validator(mode="after")
     def validate_trace_sources(self) -> "WekaTraceReplayConfig":

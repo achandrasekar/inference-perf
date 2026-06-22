@@ -168,6 +168,9 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--data.weka_trace_replay.num_dataset_entries` | int | Max number of dataset traces to load from HuggingFace |
 | `--data.weka_trace_replay.start_turn_index` | int | Start replay at this parent turn index. Turns prior to this index are warm context. |
 | `--data.weka_trace_replay.warmup_snapshot_sampling` | boolean | Randomly sample a start parent turn for each trace to warm up the KV-cache at different depths. |
+| `--data.weka_trace_replay.warmup_snapshot_min_ratio` | float | Min ratio of conversation progress for snapshot sampling |
+| `--data.weka_trace_replay.warmup_snapshot_max_ratio` | float | Max ratio of conversation progress for snapshot sampling |
+| `--data.weka_trace_replay.warmup_cache_priming` | boolean | Enable 1-token KV-cache priming for start turns |
 | `--data.conversation_replay.seed` | int | Random seed for deterministic generation |
 | `--data.conversation_replay.num_conversations` | int | Number of conversation blueprints to generate |
 | `--data.conversation_replay.shared_system_prompt_len` | int | Fixed shared system prompt length in tokens |
