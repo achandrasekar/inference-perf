@@ -82,6 +82,13 @@ class SessionReplayConfig(BaseModel):
     )
 
     # KV-cache invalidation
+    max_model_len: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Maximum model context length in tokens. If set, prompt message sequences are truncated to fit within this length.",
+    )
+
+    # KV-cache invalidation
     inject_random_session_id: bool = Field(
         False, description="Inject random string into unique segments to invalidate KV-cache between sessions"
     )
@@ -177,6 +184,7 @@ class WekaTraceReplayConfig(SessionReplayConfig):
     )
     trace_idle_gap_cap_seconds: float = Field(60.0, description="Cap idle timing gaps between turns in seconds")
     ignore_trace_delays: bool = Field(False, description="Ignore delays/delays from original trace and run back-to-back")
+    forbid_input_truncation: bool = Field(True, description="Forbid prompt truncation to preserve prefix cache matching")
     use_think_time_only: bool = Field(False, description="Only use think_time attribute instead of timestamps")
     default_block_size: int = Field(64, description="Default block size if not specified in trace")
     num_dataset_entries: int = Field(100, description="Max number of dataset traces to load from HuggingFace")

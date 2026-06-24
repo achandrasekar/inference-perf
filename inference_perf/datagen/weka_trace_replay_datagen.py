@@ -101,6 +101,9 @@ def _build_session_worker_task_global(trace_and_index: Tuple[Any, int]) -> Optio
         from inference_perf.datagen.otel_trace_to_replay_graph import build_graph
 
         graph = build_graph(raw_calls, source_file=f"weka_trace_{trace.id}")
+        if _global_generator.weka_config.ignore_trace_delays:
+            for ev in graph.events.values():
+                ev.wait_ms = 0
         if _global_generator.weka_config.warmup_cache_priming and warmup_event is not None:
             _global_generator._insert_warmup_event_into_graph(graph, warmup_event)
             warmup_event = None
@@ -294,6 +297,7 @@ class RoleSegment:
     block_count: int
     tokens: List[int]
     content: str
+    token_count: int
 
 
 def longest_common_prefix(prev_hash_ids: List[int], curr_hash_ids: List[int]) -> int:
@@ -309,6 +313,7 @@ def truncate_synth_buf_at_block(
     target_blocks: int,
     block_size: int,
     decode_tokens_to_text: Any,
+    count_tokens: Any,
     prev_partial_tail: int = 0,
 ) -> Optional[int]:
     if target_blocks <= 0:
@@ -327,6 +332,7 @@ def truncate_synth_buf_at_block(
                 stripped_n = min(prev_partial_tail, len(seg.tokens))
                 seg.tokens = seg.tokens[:-stripped_n]
                 seg.content = decode_tokens_to_text(seg.tokens)
+                seg.token_count = count_tokens(seg.content)
                 disturbed = i
             deleted_past_boundary = i + 1 < len(segments)
             del segments[i + 1 :]
@@ -341,6 +347,7 @@ def truncate_synth_buf_at_block(
         seg.block_count = kept_blocks
         seg.tokens = seg.tokens[:kept_tokens_n]
         seg.content = decode_tokens_to_text(seg.tokens)
+        seg.token_count = count_tokens(seg.content)
         del segments[i + 1 :]
         return i
     return None
@@ -355,11 +362,13 @@ class ConversationReconstructor:
         decode_block_tokens: Any,
         sample_partial_tail_tokens: Any,
         decode_tokens_to_text: Any,
+        count_tokens: Any,
     ):
         self.block_size = block_size
         self.decode_block_tokens = decode_block_tokens
         self.sample_partial_tail_tokens = sample_partial_tail_tokens
         self.decode_tokens_to_text = decode_tokens_to_text
+        self.count_tokens = count_tokens
         self._segments: List[RoleSegment] = []
         self._last_disturbance_at: Optional[int] = None
 
@@ -389,13 +398,15 @@ class ConversationReconstructor:
                     prefix_blocks = len(hash_ids)
                 if prefix_blocks > 0:
                     seg_tokens = self.decode_block_tokens(hash_ids[cursor : cursor + prefix_blocks])
+                    content = self.decode_tokens_to_text(seg_tokens)
                     segs.append(
                         RoleSegment(
                             role="system",
                             block_start=cursor,
                             block_count=prefix_blocks,
                             tokens=seg_tokens,
-                            content=self.decode_tokens_to_text(seg_tokens),
+                            content=content,
+                            token_count=self.count_tokens(content),
                         )
                     )
                     cursor += prefix_blocks
@@ -405,13 +416,15 @@ class ConversationReconstructor:
         synth_tail_n = missing_block_tokens + partial_tail_tokens_n
         if synth_tail_n > 0:
             user_tokens.extend(self.sample_partial_tail_tokens(synth_tail_n, seed))
+        content = self.decode_tokens_to_text(user_tokens)
         segs.append(
             RoleSegment(
                 role="user",
                 block_start=cursor,
                 block_count=user_blocks,
                 tokens=user_tokens,
-                content=self.decode_tokens_to_text(user_tokens),
+                content=content,
+                token_count=self.count_tokens(content),
             )
         )
 
@@ -439,6 +452,7 @@ class ConversationReconstructor:
             lcp,
             bs,
             decode_tokens_to_text=self.decode_tokens_to_text,
+            count_tokens=self.count_tokens,
             prev_partial_tail=prev_partial_tail,
         )
         self._last_disturbance_at = truncate_disturbance
@@ -452,19 +466,23 @@ class ConversationReconstructor:
         new_blocks_count = m_curr - lcp
 
         asst_blocks_target = math.ceil(prev_out_tokens / bs) if prev_out_tokens > 0 else 0
+        if not any(seg.role == "user" for seg in self._segments):
+            asst_blocks_target = 0
         asst_blocks = min(asst_blocks_target, new_blocks_count)
         asst_emit_size = asst_blocks * bs
 
         cursor = lcp
         if asst_blocks > 0:
             asst_tokens = new_region_tokens[:asst_emit_size]
+            content = self.decode_tokens_to_text(asst_tokens)
             self._segments.append(
                 RoleSegment(
                     role="assistant",
                     block_start=cursor,
                     block_count=asst_blocks,
                     tokens=asst_tokens,
-                    content=self.decode_tokens_to_text(asst_tokens),
+                    content=content,
+                    token_count=self.count_tokens(content),
                 )
             )
             cursor += asst_blocks
@@ -472,18 +490,20 @@ class ConversationReconstructor:
         user_blocks = new_blocks_count - asst_blocks
         user_tokens = new_region_tokens[asst_emit_size:]
         if len(user_tokens) > 0:
+            content = self.decode_tokens_to_text(user_tokens)
             self._segments.append(
                 RoleSegment(
                     role="user",
                     block_start=cursor,
                     block_count=user_blocks,
                     tokens=user_tokens,
-                    content=self.decode_tokens_to_text(user_tokens),
+                    content=content,
+                    token_count=self.count_tokens(content),
                 )
             )
 
-    def snapshot_messages(self) -> List[Dict[str, str]]:
-        return [{"role": s.role, "content": s.content} for s in self._segments]
+    def snapshot_messages(self) -> List[Dict[str, Any]]:
+        return [{"role": s.role, "content": s.content, "token_count": s.token_count} for s in self._segments]
 
 
 # =============================================================================
@@ -615,6 +635,28 @@ def _build_trace_idle_timing(
         subagent_start_by_outer_idx=subagent_start_by_outer_idx,
     )
 
+
+_TITLE_GEN_MAX_OUTPUT_TOKENS = 64
+
+def _split_off_preamble(
+    normals: List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]],
+) -> Tuple[List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]], List[Tuple[int, Union[WekaNormalRequest, WekaStreamingRequest]]]]:
+    if len(normals) < 2:
+        return [], normals
+    ordered = sorted(normals, key=lambda item: (item[1].t if hasattr(item[1], "t") and item[1].t is not None else 0, item[0]))
+    outer_idx, req = ordered[0]
+    if not req.hash_ids:
+        return [], normals
+    rest = ordered[1:]
+    if any(longest_common_prefix(req.hash_ids, other.hash_ids) > 0 for _, other in rest if other.hash_ids):
+        return [], normals
+    if req.output_length > _TITLE_GEN_MAX_OUTPUT_TOKENS:
+        other_blocks: set[int] = set()
+        for _, other in rest:
+            other_blocks.update(other.hash_ids)
+        if not other_blocks.isdisjoint(req.hash_ids):
+            return [], normals
+    return [(outer_idx, req)], sorted(rest, key=lambda item: item[0])
 
 # =============================================================================
 # WekaTraceReplayDataGenerator Class
@@ -833,6 +875,63 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         random.shuffle(sessions)
         return sessions
 
+    def _truncate_text_to_len(self, text: str, max_tokens: int) -> str:
+        tokens = self.tokenizer.get_tokenizer().encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        truncated_tokens = tokens[:max_tokens]
+        decoded = self.tokenizer.get_tokenizer().decode(truncated_tokens)
+        return decoded if isinstance(decoded, str) else " ".join(decoded)
+
+    def _clamp_messages_to_model_limit(self, messages: List[Dict[str, Any]], max_out: int) -> List[Dict[str, str]]:
+        if not self.weka_config.max_model_len or self.weka_config.forbid_input_truncation:
+            return [{"role": m["role"], "content": m["content"]} for m in messages]
+            
+        max_in = self.weka_config.max_model_len - max_out - 8192
+        if max_in <= 0:
+            return [{"role": m["role"], "content": m["content"]} for m in messages]
+            
+        # 1. Identify system prompt
+        sys_msg = None
+        start_idx = 0
+        sys_len = 0
+        if messages and messages[0].get("role") == "system":
+            sys_msg = messages[0]
+            start_idx = 1
+            sys_len = sys_msg.get("token_count") if "token_count" in sys_msg else self.tokenizer.count_tokens(sys_msg["content"])
+            
+        if sys_len >= max_in:
+            # System prompt alone exceeds the budget, truncate it and return
+            truncated_content = self._truncate_text_to_len(sys_msg["content"], max_in)
+            return [{"role": "system", "content": truncated_content}]
+            
+        budget = max_in - sys_len
+        kept_messages = []
+        accumulated_len = 0
+        
+        # 2. Iterate in reverse over the non-system messages
+        for msg in reversed(messages[start_idx:]):
+            msg_len = msg.get("token_count") if "token_count" in msg else self.tokenizer.count_tokens(msg["content"])
+            if accumulated_len + msg_len <= budget:
+                kept_messages.insert(0, msg)
+                accumulated_len += msg_len
+            else:
+                # Fill the remaining budget with a truncated version of the current message
+                remaining_budget = budget - accumulated_len
+                if remaining_budget > 0:
+                    truncated_content = self._truncate_text_to_len(msg["content"], remaining_budget)
+                    kept_messages.insert(0, {"role": msg["role"], "content": truncated_content})
+                break
+                
+        # Strip token_count field from dicts to return standard {"role", "content"}
+        final_messages = []
+        if sys_msg:
+            final_messages.append({"role": sys_msg["role"], "content": sys_msg["content"]})
+        for m in kept_messages:
+            final_messages.append({"role": m["role"], "content": m["content"]})
+            
+        return final_messages
+
     def _reconstruct_raw_calls(self, trace: WekaTrace) -> Tuple[List[RawCall], Optional[ReplaySessionEvent]]:
         # Reset local cache for deterministic scope
         self._cache.clear()
@@ -849,6 +948,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 normals.append((idx, req))
             elif isinstance(req, WekaSubagentEntry):
                 subagents.append((idx, req))
+
+        preamble, detect_normals = _split_off_preamble(normals)
+        if preamble:
+            normals = sorted(preamble + detect_normals, key=lambda item: (item[1].t if hasattr(item[1], "t") and item[1].t is not None else 0, item[0]))
 
         trace_bs = self.weka_config.default_block_size
         if hasattr(trace, "block_size") and trace.block_size:
@@ -941,6 +1044,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             decode_block_tokens=decode_block_tokens,
             sample_partial_tail_tokens=sample_partial_tail_tokens,
             decode_tokens_to_text=decode_tokens_to_text,
+            count_tokens=tokenizer_instance.count_tokens,
         )
 
         # Warm up the reconstructor state with pruned turns
@@ -969,6 +1073,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         warmup_event = None
         if self.weka_config.warmup_cache_priming and start_k > 0:
             messages_dicts = parent_recon.snapshot_messages()
+            messages_dicts = self._clamp_messages_to_model_limit(messages_dicts, max_out=1)
             warmup_event = ReplaySessionEvent(
                 call_id=f"sa_warmup_{trace.id}_turn_{start_k - 1}",
                 event_id=f"warmup:{trace.id}",
@@ -1009,6 +1114,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
 
             # Retrieve text messages for the prompt
             messages_dicts = parent_recon.snapshot_messages()
+            messages_dicts = self._clamp_messages_to_model_limit(messages_dicts, max_out=req.output_length)
             messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
 
             # Reconstruct timing
@@ -1025,9 +1131,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     decode_block_tokens=decode_block_tokens,
                     sample_partial_tail_tokens=sample_partial_tail_tokens,
                     decode_tokens_to_text=decode_tokens_to_text,
+                    count_tokens=tokenizer_instance.count_tokens,
                 )
                 lookahead._segments = [
-                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
+                    RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content, s.token_count)
                     for s in parent_recon._segments
                 ]
                 next_req = parent_plan.normals[k + 1][1]
@@ -1077,6 +1184,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 decode_block_tokens=decode_block_tokens,
                 sample_partial_tail_tokens=sample_partial_tail_tokens,
                 decode_tokens_to_text=decode_tokens_to_text,
+                count_tokens=tokenizer_instance.count_tokens,
             )
 
             for k, creq in enumerate(cp.stream_requests):
@@ -1101,6 +1209,7 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                     )
 
                 messages_dicts = child_recon.snapshot_messages()
+                messages_dicts = self._clamp_messages_to_model_limit(messages_dicts, max_out=creq.output_length)
                 messages = [ReplayMessage(role=m["role"], text=m["content"]) for m in messages_dicts]
 
                 t_timing = timing.child_by_session_request[(cp.session_id, k)]
@@ -1114,9 +1223,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                         decode_block_tokens=decode_block_tokens,
                         sample_partial_tail_tokens=sample_partial_tail_tokens,
                         decode_tokens_to_text=decode_tokens_to_text,
+                        count_tokens=tokenizer_instance.count_tokens,
                     )
                     lookahead._segments = [
-                        RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content)
+                        RoleSegment(s.role, s.block_start, s.block_count, list(s.tokens), s.content, s.token_count)
                         for s in child_recon._segments
                     ]
                     next_creq = cp.stream_requests[k + 1]
